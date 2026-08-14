@@ -42,6 +42,15 @@ Deploy in this order, since downstream modules read upstream ones via
    — each reads `iam`'s remote state for its execution role ARN.
 4. **`terraform/eventbridge`** — reads both `iam`'s and `step_functions`'
    remote state.
+5. **`terraform/monitoring`** — reads resources created by the modules above.
+6. **`terraform/quicksight`** — deploy only after a pipeline run has actually
+   populated the Gold tables it points at (`video_trends`, `category_analytics`,
+   `channel_analytics`, `trend_opportunities`, `trending_analytics`). Also
+   requires a one-time **manual** step that has no Terraform resource:
+   QuickSight must already be subscribed/enabled in this AWS account, and its
+   service role needs S3 + Athena access granted via QuickSight console →
+   Manage QuickSight → Security & permissions. See `docs/dashboard.md`.
+7. **`terraform/budget`** — standalone, deploy last.
 
 ---
 
@@ -109,6 +118,9 @@ Tear down in the **reverse** order of deployment (dependents before their
 dependencies), from inside each module directory:
 
 ```bash
+cd terraform/budget         && terraform destroy
+cd terraform/quicksight     && terraform destroy
+cd terraform/monitoring     && terraform destroy
 cd terraform/eventbridge   && terraform destroy
 cd terraform/step_functions && terraform destroy
 cd terraform/lambda        && terraform destroy -var="youtube_api_key=<your-key>"

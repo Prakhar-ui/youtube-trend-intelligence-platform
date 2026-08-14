@@ -1,0 +1,106 @@
+<svg viewBox="0 0 1200 1500" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="1500" fill="#ffffff"/>
+
+  <text x="600" y="40" text-anchor="middle" font-size="24" font-weight="700" fill="#0f172a">YouTube Trend Intelligence Platform — Architecture</text>
+
+  <!-- Ingestion -->
+  <rect x="450" y="70" width="300" height="50" rx="8" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="600" y="100" text-anchor="middle" font-size="15" fill="#0c4a6e">YouTube Data API</text>
+
+  <line x1="600" y1="120" x2="600" y2="150" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="450" y="150" width="300" height="50" rx="8" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="600" y="180" text-anchor="middle" font-size="15" fill="#0c4a6e">EventBridge (daily trigger)</text>
+
+  <line x1="600" y1="200" x2="600" y2="230" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="380" y="230" width="440" height="50" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="600" y="260" text-anchor="middle" font-size="15" fill="#4c1d95">Step Functions — orchestration, retries, SNS alerts</text>
+
+  <line x1="600" y1="280" x2="600" y2="310" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="450" y="310" width="300" height="50" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="600" y="340" text-anchor="middle" font-size="15" fill="#78350f">Lambda: Ingestion (10 markets)</text>
+
+  <line x1="600" y1="360" x2="600" y2="390" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="400" y="390" width="400" height="55" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="600" y="415" text-anchor="middle" font-size="15" fill="#14532d">S3 Bronze</text>
+  <text x="600" y="434" text-anchor="middle" font-size="12" fill="#166534">immutable, region/date/hour partitioned — never overwritten</text>
+
+  <line x1="600" y1="445" x2="600" y2="475" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="380" y="475" width="440" height="50" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="600" y="505" text-anchor="middle" font-size="15" fill="#78350f">Glue: Bronze → Silver (PySpark)</text>
+
+  <line x1="600" y1="525" x2="600" y2="555" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="400" y="555" width="400" height="50" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="600" y="585" text-anchor="middle" font-size="15" fill="#14532d">S3 Silver — clean_statistics</text>
+
+  <line x1="600" y1="605" x2="600" y2="635" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="380" y="635" width="440" height="50" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="600" y="665" text-anchor="middle" font-size="15" fill="#7f1d1d">Data Quality Gate (Lambda) — Silver</text>
+
+  <line x1="600" y1="685" x2="600" y2="715" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="630" y="705" font-size="11" fill="#7f1d1d">fail → SNS alert</text>
+
+  <rect x="380" y="715" width="440" height="50" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="600" y="745" text-anchor="middle" font-size="15" fill="#78350f">Glue: Silver → Gold (category / channel analytics)</text>
+
+  <line x1="600" y1="765" x2="600" y2="795" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="330" y="795" width="540" height="60" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="600" y="820" text-anchor="middle" font-size="15" fill="#78350f">Glue: Trend Intelligence</text>
+  <text x="600" y="840" text-anchor="middle" font-size="12" fill="#92400e">video velocity/persistence, cross-market expansion, trend opportunities</text>
+
+  <line x1="600" y1="855" x2="600" y2="885" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="380" y="885" width="440" height="50" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="600" y="915" text-anchor="middle" font-size="15" fill="#7f1d1d">Data Quality Gate (Lambda) — Gold</text>
+
+  <line x1="600" y1="935" x2="600" y2="965" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="630" y="955" font-size="11" fill="#7f1d1d">fail → SNS alert</text>
+
+  <rect x="400" y="965" width="400" height="50" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="600" y="995" text-anchor="middle" font-size="15" fill="#14532d">S3 Gold + Glue Catalog</text>
+
+  <line x1="600" y1="1015" x2="600" y2="1045" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="450" y="1045" width="300" height="50" rx="8" fill="#e0e7ff" stroke="#4f46e5" stroke-width="2"/>
+  <text x="600" y="1075" text-anchor="middle" font-size="15" fill="#312e81">Amazon Athena</text>
+
+  <line x1="600" y1="1095" x2="600" y2="1125" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="400" y="1125" width="400" height="50" rx="8" fill="#e0e7ff" stroke="#4f46e5" stroke-width="2"/>
+  <text x="600" y="1155" text-anchor="middle" font-size="15" fill="#312e81">Amazon QuickSight (data source + datasets)</text>
+
+  <line x1="600" y1="1175" x2="600" y2="1205" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="330" y="1205" width="540" height="55" rx="8" fill="#f1f5f9" stroke="#334155" stroke-width="2"/>
+  <text x="600" y="1230" text-anchor="middle" font-size="15" font-weight="600" fill="#0f172a">4 Dashboards</text>
+  <text x="600" y="1250" text-anchor="middle" font-size="12" fill="#334155">Executive Overview · Trend Intelligence · Market Intelligence · Channel Intelligence</text>
+
+  <line x1="600" y1="1260" x2="600" y2="1290" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="420" y="1290" width="360" height="50" rx="8" fill="#0f172a"/>
+  <text x="600" y="1320" text-anchor="middle" font-size="15" fill="#ffffff" font-weight="600">Business Decisions</text>
+
+  <!-- Supporting systems -->
+  <rect x="60" y="1370" width="1080" height="105" rx="8" fill="#fafafa" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="600" y="1395" text-anchor="middle" font-size="14" font-weight="600" fill="#334155">Supporting Systems</text>
+  <text x="120" y="1420" font-size="12" fill="#475569">Terraform</text>
+  <text x="120" y="1438" font-size="11" fill="#64748b">provisions every AWS resource above, modular by service</text>
+  <text x="420" y="1420" font-size="12" fill="#475569">GitHub Actions CI/CD</text>
+  <text x="420" y="1438" font-size="11" fill="#64748b">test (fmt/pytest) → plan (PRs) → deploy (main)</text>
+  <text x="720" y="1420" font-size="12" fill="#475569">CloudWatch + SNS</text>
+  <text x="720" y="1438" font-size="11" fill="#64748b">logs, alarms, and failure notifications at every pipeline stage</text>
+  <text x="1000" y="1420" font-size="12" fill="#475569">Data Quality</text>
+  <text x="1000" y="1438" font-size="11" fill="#64748b">two gates: Silver + Gold</text>
+</svg>
