@@ -1,0 +1,305 @@
+name: CI/CD - Terraform Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ap-south-1
+  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
+
+jobs:
+
+  # ============================================================
+  # CI - TEST, COVERAGE & TERRAFORM VALIDATION
+  # ============================================================
+
+  test:
+    name: CI - Test & Validate
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ----------------------------------------------------------
+      # Checkout
+      # ----------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Python
+      # ----------------------------------------------------------
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      # ----------------------------------------------------------
+      # Install dependencies
+      # ----------------------------------------------------------
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # ----------------------------------------------------------
+      # Run pytest + 95% coverage
+      # ----------------------------------------------------------
+
+      - name: Run tests with coverage
+        run: |
+          python -m pytest \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=95
+
+      # ----------------------------------------------------------
+      # Upload coverage report
+      # ----------------------------------------------------------
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-coverage-report
+          path: coverage.xml
+
+      # ----------------------------------------------------------
+      # Terraform
+      # ----------------------------------------------------------
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            terraform-${{ runner.os }}-
+
+      - name: Create Terraform plugin cache
+        run: |
+          mkdir -p ~/.terraform.d/plugin-cache
+
+      # ----------------------------------------------------------
+      # Terraform formatting
+      # ----------------------------------------------------------
+
+      - name: Terraform format check
+        run: |
+          terraform fmt -check -recursive
+
+      # ----------------------------------------------------------
+      # Terraform validation
+      # ----------------------------------------------------------
+
+      - name: Validate Terraform modules
+        shell: bash
+        run: |
+          set -e
+
+          for dir in terraform/*; do
+
+            if [ -d "$dir" ]; then
+
+              echo "=========================================="
+              echo "Validating: $dir"
+              echo "=========================================="
+
+              cd "$dir"
+
+              terraform init \
+                -backend=false \
+                -input=false
+
+              terraform validate
+
+              cd ../..
+            fi
+
+          done
+
+
+  # ============================================================
+  # CD - DEPLOY TO AWS
+  # ============================================================
+
+  deploy:
+    name: CD - Deploy to AWS
+    needs: test
+
+    # Deploy ONLY when code is pushed to main.
+    # Pull requests run CI but never deploy.
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ----------------------------------------------------------
+      # Checkout
+      # ----------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # Terraform
+      # ----------------------------------------------------------
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            terraform-${{ runner.os }}-
+
+      - name: Create Terraform plugin cache
+        run: |
+          mkdir -p ~/.terraform.d/plugin-cache
+
+      # ----------------------------------------------------------
+      # AWS credentials
+      # ----------------------------------------------------------
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ==========================================================
+      # S3
+      # ==========================================================
+
+      - name: Deploy S3
+        working-directory: ./terraform/s3
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # IAM
+      # ==========================================================
+
+      - name: Deploy IAM
+        working-directory: ./terraform/iam
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # SNS
+      # ==========================================================
+
+      - name: Deploy SNS
+        working-directory: ./terraform/sns
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # GLUE
+      # ==========================================================
+
+      - name: Deploy Glue
+        working-directory: ./terraform/glue
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # LAMBDA
+      # ==========================================================
+
+      - name: Deploy Lambda
+        working-directory: ./terraform/lambda
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -var="youtube_api_key=${{ secrets.YOUTUBE_API_KEY }}"
+
+      # ==========================================================
+      # STEP FUNCTIONS
+      # ==========================================================
+
+      - name: Deploy Step Functions
+        working-directory: ./terraform/step_functions
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # EVENTBRIDGE
+      # ==========================================================
+
+      - name: Deploy EventBridge
+        working-directory: ./terraform/eventbridge
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # MONITORING
+      # ==========================================================
+
+      - name: Deploy Monitoring
+        working-directory: ./terraform/monitoring
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # BUDGET
+      # ==========================================================
+
+      - name: Deploy Budget
+        working-directory: ./terraform/budget
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      # ==========================================================
+      # DEPLOYMENT COMPLETE
+      # ==========================================================
+
+      - name: Deployment Summary
+        run: |
+          echo "=========================================="
+          echo "AWS DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+          echo "Environment: dev"
+          echo "Region: $AWS_REGION"
+          echo "Commit: $GITHUB_SHA"
+          echo "=========================================="
