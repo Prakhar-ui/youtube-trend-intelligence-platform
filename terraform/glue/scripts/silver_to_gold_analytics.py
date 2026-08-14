@@ -65,29 +65,145 @@ def build_trending_analytics(df: DataFrame) -> DataFrame:
 
 
 def build_channel_analytics(df: DataFrame) -> DataFrame:
-    """Builds channel performance metrics ranked by regional views."""
-    channel = df.groupBy("channel_title", "region").agg(
-        F.countDistinct("video_id").alias("total_videos"),
-        F.sum("views").alias("total_views"),
-        F.sum("likes").alias("total_likes"),
-        F.sum("comment_count").alias("total_comments"),
-        F.avg("views").alias("avg_views_per_video"),
-        F.avg("engagement_rate").alias("avg_engagement_rate"),
-        F.max("views").alias("peak_views"),
-        F.count("trending_date_parsed").alias("times_trending"),
-        F.min("trending_date_parsed").alias("first_trending"),
-        F.max("trending_date_parsed").alias("last_trending"),
-        F.collect_set("category_name").alias("categories"),
+    """Channel performance, CUMULATIVE-TO-DATE, at (channel, region,
+    snapshot_date) grain. Each row answers 'as of this date, how has this
+    channel performed in this market so far' -- unlike the original single
+    lifetime-aggregate design, this lets trending_frequency, trend_score, etc.
+    evolve over time and be compared date to date.
+
+    channel_id is the entity key where available (YouTube API rows);
+    channel_title is the fallback for Kaggle-format rows where channel_id is
+    null (see docs/data_model.md). Distinct video counts are computed via the
+    standard 'first occurrence' running-count trick, since Spark window
+    functions don't support a running countDistinct directly.
+    """
+    df = df.withColumn("channel_key", F.coalesce(F.col("channel_id"), F.col("channel_title")))
+
+    daily = df.groupBy("channel_key", "channel_title", "region", "trending_date_parsed").agg(
+        F.sum("views").alias("daily_views"),
+        F.sum("likes").alias("daily_likes"),
+        F.sum("comment_count").alias("daily_comments"),
+        F.avg("engagement_rate").alias("daily_avg_engagement_rate"),
+        F.max("views").alias("daily_peak_views"),
     )
 
-    window_rank = Window.partitionBy("region").orderBy(F.col("total_views").desc())
-    channel = channel.withColumn("rank_in_region", F.row_number().over(window_rank))
-    
+    first_seen_window = Window.partitionBy("channel_key", "region", "video_id").orderBy("trending_date_parsed")
+    first_seen = (
+        df.withColumn("_rn", F.row_number().over(first_seen_window))
+        .filter(F.col("_rn") == 1)
+        .groupBy("channel_key", "region", "trending_date_parsed")
+        .agg(F.count("video_id").alias("new_distinct_videos"))
+    )
+
+    daily = daily.join(first_seen, on=["channel_key", "region", "trending_date_parsed"], how="left")
+    daily = daily.withColumn("new_distinct_videos", F.coalesce(F.col("new_distinct_videos"), F.lit(0)))
+
+    cumulative_window = (
+        Window.partitionBy("channel_key", "region")
+        .orderBy("trending_date_parsed")
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+
+    channel = (
+        daily.withColumn("trending_video_count_to_date", F.sum("new_distinct_videos").over(cumulative_window))
+        .withColumn("total_views_to_date", F.sum("daily_views").over(cumulative_window))
+        .withColumn("total_likes_to_date", F.sum("daily_likes").over(cumulative_window))
+        .withColumn("total_comments_to_date", F.sum("daily_comments").over(cumulative_window))
+        .withColumn("avg_engagement_rate_to_date", F.avg("daily_avg_engagement_rate").over(cumulative_window))
+        .withColumn("peak_views_to_date", F.max("daily_peak_views").over(cumulative_window))
+        .withColumn(
+            "days_active_to_date",
+            F.row_number().over(Window.partitionBy("channel_key", "region").orderBy("trending_date_parsed"))
+        )
+        .withColumn("first_trending_date", F.min("trending_date_parsed").over(cumulative_window))
+    )
+
+    channel = channel.withColumn(
+        "avg_views_per_video_to_date",
+        F.when(
+            F.col("trending_video_count_to_date") > 0,
+            F.round(F.col("total_views_to_date") / F.col("trending_video_count_to_date"), 2)
+        ).otherwise(F.lit(0.0))
+    )
+
+    # trending_frequency: fraction of calendar days since this channel's first
+    # trending appearance in this region (inclusive of both endpoints) that
+    # it's had at least one trending video. 1.0 means trending every day since
+    # it first appeared; capped at 1.0 by construction since a channel can't
+    # be active on more days than exist in that span.
+    days_span_inclusive = F.datediff(F.col("trending_date_parsed"), F.col("first_trending_date")).cast("double") + F.lit(1.0)
+    channel = channel.withColumn(
+        "trending_frequency",
+        F.round(F.col("days_active_to_date") / days_span_inclusive, 4)
+    )
+
+    rank_window = Window.partitionBy("region", "trending_date_parsed").orderBy(F.col("total_views_to_date").desc())
+    channel = channel.withColumn("rank_in_region", F.row_number().over(rank_window))
+
+    channel = channel.select(
+        F.col("channel_key").alias("channel_id"),
+        F.col("channel_title"),
+        F.col("region"),
+        F.col("trending_date_parsed").alias("snapshot_date"),
+        F.col("trending_video_count_to_date"),
+        F.col("total_views_to_date"),
+        F.col("total_likes_to_date"),
+        F.col("total_comments_to_date"),
+        F.col("avg_views_per_video_to_date"),
+        F.col("avg_engagement_rate_to_date"),
+        F.col("peak_views_to_date"),
+        F.col("days_active_to_date"),
+        F.col("first_trending_date"),
+        F.col("trending_frequency"),
+        F.col("rank_in_region"),
+    )
+
+    channel = add_markets_present(channel)
+    channel = add_channel_trend_score(channel)
+
     return channel.withColumn("_aggregated_at", F.current_timestamp())
 
 
+def add_markets_present(channel_df: DataFrame) -> DataFrame:
+    """Adds markets_present: how many distinct regions this channel has had a
+    trending video in, cumulative to date, across ALL regions -- not just the
+    region of the current row. This is the cross-market signal behind
+    'multi-market channels' (spec section 16)."""
+    first_region_seen = Window.partitionBy("channel_id", "region").orderBy("snapshot_date")
+    region_entries = (
+        channel_df.withColumn("_rn", F.row_number().over(first_region_seen))
+        .filter(F.col("_rn") == 1)
+        .select("channel_id", "region", F.col("snapshot_date").alias("region_entry_date"))
+    )
+
+    dates = channel_df.select("channel_id", "snapshot_date").distinct()
+    markets_present = (
+        dates.join(region_entries, on="channel_id", how="left")
+        .filter(F.col("region_entry_date") <= F.col("snapshot_date"))
+        .groupBy("channel_id", "snapshot_date")
+        .agg(F.countDistinct("region").alias("markets_present"))
+    )
+
+    return channel_df.join(markets_present, on=["channel_id", "snapshot_date"], how="left")
+
+
+def add_channel_trend_score(channel_df: DataFrame) -> DataFrame:
+    """A simple, explainable channel trend score (0-100): 70% percentile rank
+    of total_views_to_date within the same region+date, 30% trending_frequency.
+    Weights documented in docs/trend_intelligence.md."""
+    pct_window = Window.partitionBy("region", "snapshot_date").orderBy(F.col("total_views_to_date").asc())
+    channel_df = channel_df.withColumn("views_percentile", F.round(F.percent_rank().over(pct_window) * 100, 2))
+    channel_df = channel_df.withColumn(
+        "trend_score",
+        F.round(F.col("views_percentile") * 0.7 + F.col("trending_frequency") * 100 * 0.3, 2)
+    )
+    return channel_df
+
+
 def build_category_analytics(df: DataFrame) -> DataFrame:
-    """Builds category-level trends over time including view share percentage."""
+    """Builds category-level trends over time including view share percentage,
+    growth vs. the category's own previous snapshot in the same region,
+    3-snapshot rolling momentum, and its rank within region+date."""
     category = df.groupBy("category_name", "category_id", "region", "trending_date_parsed").agg(
         F.count("video_id").alias("video_count"),
         F.sum("views").alias("total_views"),
@@ -102,7 +218,31 @@ def build_category_analytics(df: DataFrame) -> DataFrame:
         "view_share_pct",
         F.round(F.col("total_views") / F.sum("total_views").over(window_total) * 100, 2)
     )
-    
+
+    lag_window = Window.partitionBy("category_id", "region").orderBy("trending_date_parsed")
+    category = category.withColumn("previous_total_views", F.lag("total_views").over(lag_window))
+    category = category.withColumn(
+        "category_growth_pct",
+        F.when(F.col("previous_total_views").isNull(), F.lit(None).cast("double"))
+         .when(F.col("previous_total_views") == 0, F.lit(None).cast("double"))
+         .otherwise(F.round((F.col("total_views") - F.col("previous_total_views")) / F.col("previous_total_views") * 100, 2))
+    )
+
+    # 3-snapshot rolling average of growth, to smooth day-to-day noise into a
+    # "momentum" signal (a single day's growth spike vs. a sustained trend).
+    momentum_window = Window.partitionBy("category_id", "region").orderBy("trending_date_parsed").rowsBetween(-2, 0)
+    category = category.withColumn("category_momentum", F.round(F.avg("category_growth_pct").over(momentum_window), 2))
+
+    rank_window = Window.partitionBy("region", "trending_date_parsed").orderBy(F.col("total_views").desc())
+    category = category.withColumn("category_rank", F.dense_rank().over(rank_window))
+    prev_rank_window = Window.partitionBy("category_id", "region").orderBy("trending_date_parsed")
+    category = category.withColumn("previous_rank", F.lag("category_rank").over(prev_rank_window))
+    category = category.withColumn(
+        "rank_change",
+        F.when(F.col("previous_rank").isNotNull(), F.col("previous_rank") - F.col("category_rank"))
+         .otherwise(F.lit(None).cast("int"))
+    )
+
     return category.withColumn("_aggregated_at", F.current_timestamp())
 
 
@@ -185,7 +325,10 @@ if __name__ == "__main__":
     write_to_gold(channel_df, "channel_analytics", f"s3://{GOLD_BUCKET}/youtube/channel_analytics/")
 
     logger.info("Building Gold: category_analytics...")
-    write_to_gold(category_df, "category_analytics", f"s3://{GOLD_BUCKET}/youtube/category_analytics/")
+    write_to_gold(
+        category_df.withColumnRenamed("trending_date_parsed", "snapshot_date"),
+        "category_analytics", f"s3://{GOLD_BUCKET}/youtube/category_analytics/"
+    )
 
     logger.info("Gold layer build complete.")
     job.commit()

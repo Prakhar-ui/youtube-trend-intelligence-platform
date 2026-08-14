@@ -57,6 +57,18 @@ resource "aws_glue_job" "bronze_to_silver_statistics_glue_job" {
     "--bronze_table" = "raw_statistics"
 
     #################################################
+    # Markets
+    #
+    # NOTE: keep this in sync with YOUTUBE_REGIONS in
+    # terraform/lambda/youtube_api_integration_function.tf. Each module here
+    # is a separate Terraform root/state, so there isn't a single shared
+    # variable to source this from without a larger restructuring; documented
+    # as a known limitation in docs/decisions.md.
+    #################################################
+
+    "--regions" = "us,gb,in,ca,au,de,fr,jp,kr,ru"
+
+    #################################################
     # Silver Layer Parameters
     #################################################
 

@@ -9,48 +9,61 @@ from pyspark.sql.types import StringType, LongType, BooleanType
 # ── Transformation Functions (Testable locally with pure PySpark) ────────────
 
 def enforce_schema(df: DataFrame) -> DataFrame:
-    """Standardizes columns for both Kaggle CSV and YouTube API JSON formats."""
+    """Standardizes columns for both Kaggle CSV and YouTube API JSON formats.
+
+    Kaggle CSV format has no channel_id/duration/definition/caption fields —
+    these are populated as null for that source. Downstream Trend Intelligence
+    logic must treat them as optional (see docs/data_model.md).
+    """
     columns = set(df.columns)
-    
+
+    def api_col(dotted_name, cast=None):
+        """Reads a YouTube-API field by its literal (dot or double-underscore)
+        column name, tolerating either naming convention, and returns a null
+        literal if the field is absent from this batch entirely."""
+        underscored = dotted_name.replace(".", "__")
+        if dotted_name in columns:
+            c = F.col(f"`{dotted_name}`")
+        elif underscored in columns:
+            c = F.col(underscored)
+        else:
+            c = F.lit(None)
+        return c.cast(cast) if cast else c
+
     if "snippet.title" in columns or "snippet__title" in columns:
         # YouTube API format — flatten nested structure
         return df.select(
             F.col("id").alias("video_id"),
             F.lit(datetime.utcnow().strftime("%y.%d.%m")).alias("trending_date"),
-            F.col("`snippet.title`").alias("title") if "snippet.title" in columns 
-                else F.col("snippet__title").alias("title"),
-            F.col("`snippet.channelTitle`").alias("channel_title") if "snippet.channelTitle" in columns 
-                else F.col("snippet__channelTitle").alias("channel_title"),
-            F.col("`snippet.categoryId`").cast(LongType()).alias("category_id") if "snippet.categoryId" in columns 
-                else F.col("snippet__categoryId").cast(LongType()).alias("category_id"),
-            F.col("`snippet.publishedAt`").alias("publish_time") if "snippet.publishedAt" in columns 
-                else F.col("snippet__publishedAt").alias("publish_time"),
-            F.col("`snippet.tags`").alias("tags") if "snippet.tags" in columns 
-                else F.lit(None).cast(StringType()).alias("tags"),
-            F.col("`statistics.viewCount`").cast(LongType()).alias("views") if "statistics.viewCount" in columns 
-                else F.col("statistics__viewCount").cast(LongType()).alias("views"),
-            F.col("`statistics.likeCount`").cast(LongType()).alias("likes") if "statistics.likeCount" in columns 
-                else F.col("statistics__likeCount").cast(LongType()).alias("likes"),
-            F.col("`statistics.dislikeCount`").cast(LongType()).alias("dislikes") if "statistics.dislikeCount" in columns 
-                else F.lit(0).cast(LongType()).alias("dislikes"),
-            F.col("`statistics.commentCount`").cast(LongType()).alias("comment_count") if "statistics.commentCount" in columns 
-                else F.col("statistics__commentCount").cast(LongType()).alias("comment_count"),
-            F.col("`snippet.thumbnails.default.url`").alias("thumbnail_link") if "snippet.thumbnails.default.url" in columns 
-                else F.lit(None).cast(StringType()).alias("thumbnail_link"),
+            api_col("snippet.title", StringType()).alias("title"),
+            api_col("snippet.channelTitle", StringType()).alias("channel_title"),
+            api_col("snippet.channelId", StringType()).alias("channel_id"),
+            api_col("snippet.categoryId", LongType()).alias("category_id"),
+            api_col("snippet.publishedAt", StringType()).alias("publish_time"),
+            api_col("snippet.tags", StringType()).alias("tags"),
+            api_col("statistics.viewCount", LongType()).alias("views"),
+            api_col("statistics.likeCount", LongType()).alias("likes"),
+            F.coalesce(api_col("statistics.dislikeCount", LongType()), F.lit(0).cast(LongType())).alias("dislikes"),
+            api_col("statistics.commentCount", LongType()).alias("comment_count"),
+            api_col("snippet.thumbnails.default.url", StringType()).alias("thumbnail_link"),
             F.lit(False).alias("comments_disabled"),
             F.lit(False).alias("ratings_disabled"),
             F.lit(False).alias("video_error_or_removed"),
-            F.col("`snippet.description`").alias("description") if "snippet.description" in columns 
-                else F.col("snippet__description").alias("description"),
+            api_col("snippet.description", StringType()).alias("description"),
+            api_col("contentDetails.duration", StringType()).alias("duration"),
+            api_col("contentDetails.definition", StringType()).alias("definition"),
+            api_col("contentDetails.caption", StringType()).alias("caption"),
             F.col("region"),
         )
     else:
-        # Kaggle CSV format — just cast types
+        # Kaggle CSV format — just cast types. channel_id/duration/definition/
+        # caption don't exist in the classic Kaggle dataset, so they're null.
         return df.select(
             F.col("video_id").cast(StringType()),
             F.col("trending_date").cast(StringType()),
             F.col("title").cast(StringType()),
             F.col("channel_title").cast(StringType()),
+            F.lit(None).cast(StringType()).alias("channel_id"),
             F.col("category_id").cast(LongType()),
             F.col("publish_time").cast(StringType()),
             F.col("tags").cast(StringType()),
@@ -63,8 +76,84 @@ def enforce_schema(df: DataFrame) -> DataFrame:
             F.col("ratings_disabled").cast(BooleanType()),
             F.col("video_error_or_removed").cast(BooleanType()),
             F.col("description").cast(StringType()),
+            F.lit(None).cast(StringType()).alias("duration"),
+            F.lit(None).cast(StringType()).alias("definition"),
+            F.lit(None).cast(StringType()).alias("caption"),
             F.col("region").cast(StringType()),
         )
+
+
+def add_duration_seconds(df: DataFrame) -> DataFrame:
+    """Parses ISO-8601 durations from the YouTube API (e.g. 'PT4M13S') into
+    whole seconds. Rows without a duration (e.g. Kaggle-format source data,
+    or a 'duration' column that isn't present at all) get a null
+    duration_seconds rather than a misleading 0."""
+    if "duration" not in df.columns:
+        return df.withColumn("duration_seconds", F.lit(None).cast("int"))
+
+    hours = F.coalesce(F.regexp_extract(F.col("duration"), r"(\d+)H", 1).cast("int"), F.lit(0))
+    minutes = F.coalesce(F.regexp_extract(F.col("duration"), r"(\d+)M", 1).cast("int"), F.lit(0))
+    seconds = F.coalesce(F.regexp_extract(F.col("duration"), r"(\d+)S", 1).cast("int"), F.lit(0))
+    return df.withColumn(
+        "duration_seconds",
+        F.when(
+            F.col("duration").isNotNull(),
+            hours * 3600 + minutes * 60 + seconds
+        ).otherwise(F.lit(None).cast("int"))
+    )
+
+
+def add_rate_metrics(df: DataFrame) -> DataFrame:
+    """Adds fractional engagement rate metrics (0-1 scale), as distinct from
+    the legacy percentage-based like_ratio/engagement_rate columns kept below
+    for backward compatibility. Formulas documented in docs/data_model.md:
+        like_rate    = likes / views
+        comment_rate = comment_count / views
+    Both are 0.0 when views is 0 or null, never divide-by-zero."""
+    df = df.withColumn(
+        "like_rate",
+        F.when(F.col("views") > 0, F.round(F.col("likes") / F.col("views"), 6)).otherwise(F.lit(0.0))
+    )
+    df = df.withColumn(
+        "comment_rate",
+        F.when(F.col("views") > 0, F.round(F.col("comment_count") / F.col("views"), 6)).otherwise(F.lit(0.0))
+    )
+    return df
+
+
+def add_velocity_context(df: DataFrame) -> DataFrame:
+    """Adds video_age_hours and views_per_hour.
+
+    Uses trending_date_parsed (the snapshot date, already parsed earlier in
+    cleanse_data) rather than the Glue job's wall-clock run time as the
+    observation instant, so these values stay identical on reprocessing or
+    backfill regardless of when the job actually executes.
+
+    video_age_hours is null when publish_time or trending_date_parsed can't be
+    parsed. views_per_hour floors the age at 1 hour to avoid divide-by-zero /
+    unrealistic spikes for videos observed within their publish hour."""
+    if "publish_time" not in df.columns or "trending_date_parsed" not in df.columns:
+        return df.withColumn("video_age_hours", F.lit(None).cast("double")) \
+                  .withColumn("views_per_hour", F.lit(None).cast("double"))
+
+    publish_ts = F.to_timestamp(F.col("publish_time"))
+    trending_ts = F.to_timestamp(F.col("trending_date_parsed"))
+
+    df = df.withColumn(
+        "video_age_hours",
+        F.when(
+            publish_ts.isNotNull() & trending_ts.isNotNull(),
+            F.round((F.unix_timestamp(trending_ts) - F.unix_timestamp(publish_ts)) / 3600.0, 2)
+        ).otherwise(F.lit(None).cast("double"))
+    )
+    df = df.withColumn(
+        "views_per_hour",
+        F.when(
+            F.col("video_age_hours").isNotNull(),
+            F.round(F.col("views") / F.greatest(F.col("video_age_hours"), F.lit(1.0)), 2)
+        ).otherwise(F.lit(None).cast("double"))
+    )
+    return df
 
 
 def cleanse_data(df: DataFrame, job_name: str) -> DataFrame:
@@ -102,6 +191,12 @@ def cleanse_data(df: DataFrame, job_name: str) -> DataFrame:
             F.round((F.col("likes") + F.col("dislikes") + F.col("comment_count")) / F.col("views") * 100, 4)
         ).otherwise(0.0)
     )
+
+    # Spec-defined fractional rate metrics, ISO-8601 duration parsing, and
+    # publish-to-trending velocity context (see docs/data_model.md)
+    df = add_rate_metrics(df)
+    df = add_duration_seconds(df)
+    df = add_velocity_context(df)
 
     # Add processing metadata
     df = df.withColumn("_processed_at", F.current_timestamp())
@@ -153,7 +248,8 @@ if __name__ == "__main__":
     # Job Setup
     args = getResolvedOptions(sys.argv, [
         "JOB_NAME", "bronze_database", "bronze_table",
-        "silver_bucket", "silver_database", "silver_table", "silver_path"
+        "silver_bucket", "silver_database", "silver_table", "silver_path",
+        "regions"
     ])
 
     sc = SparkContext()
@@ -172,7 +268,15 @@ if __name__ == "__main__":
     logger.info(f"Silver: {args['silver_database']}.{args['silver_table']} → {SILVER_PATH}")
 
     # 1. Read from Bronze
-    predicate = "region in ('ca','gb','us', 'in')"
+    # Markets are driven by the --regions job parameter (see
+    # bronze_to_silver_statistics_job.tf) rather than hardcoded here, so the
+    # platform can add/remove markets without a code change. NOTE: this was
+    # previously hardcoded to only 4 of the ingested regions ('ca','gb','us',
+    # 'in'), silently dropping the other 6 markets before they ever reached
+    # Silver/Gold — fixed as part of the Trend Intelligence Platform rollout.
+    regions = [r.strip().lower() for r in args["regions"].split(",") if r.strip()]
+    predicate = "region in (" + ",".join(f"'{r}'" for r in regions) + ")"
+    logger.info(f"Processing regions: {regions}")
     datasource = glueContext.create_dynamic_frame.from_catalog(
         database=BRONZE_DB,
         table_name=BRONZE_TABLE,
