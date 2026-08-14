@@ -2,7 +2,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW = ROOT / ".github" / "workflows" / "terraform-deploy.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "terraform.yml"
 
 
 def test_ci_has_python_coverage_gate_and_artifact():
