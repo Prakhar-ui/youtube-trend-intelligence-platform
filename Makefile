@@ -1,6 +1,6 @@
-.PHONY: help init validate plan apply destroy destroy-all fmt test test-glue install precommit clean
+.PHONY: help init validate plan apply destroy destroy-all fmt test test-glue validate-terraform quality install precommit clean
 
-MODULES = bootstrap s3 iam sns glue lambda step_functions eventbridge monitoring budget
+MODULES = bootstrap s3 iam sns glue lambda step_functions eventbridge monitoring budget quicksight
 
 help:  ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-20s %s\n", $$1, $$2}'
@@ -58,15 +58,25 @@ destroy-all: ## Full teardown: destroy infra, then delete terraform state/locks
 fmt: ## Format all Terraform files
 	terraform fmt -recursive terraform/
 
-test: ## Run Lambda unit tests
-	cd tests && pip install -q -r requirements-test.txt && pytest -v
+test: ## Run the full test suite with 95% minimum coverage
+	python -m pip install -q -r tests/requirements-test.txt
+	python -m pytest
 
-test-glue: ## Run Glue PySpark unit tests
-	cd tests && pip install -q pyspark pytest && pytest glue/ -v
+
+validate-terraform: ## Validate and format-check every Terraform module without AWS
+	./scripts/validate_terraform.sh
+
+quality: ## Run Python coverage tests and Terraform validation
+	python -m pytest
+	./scripts/validate_terraform.sh
+
+test-glue: ## Run Glue/PySpark tests
+	python -m pip install -q -r tests/requirements-test.txt
+	python -m pytest tests/glue
 
 install: ## Install development dependencies
-	pip install -q -r tests/requirements-test.txt
-	pip install -q pre-commit ruff mypy
+	python -m pip install -q -e ".[dev]"
+	python -m pip install -q pre-commit ruff mypy
 	pre-commit install
 
 precommit: ## Run pre-commit hooks on all files

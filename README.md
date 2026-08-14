@@ -207,11 +207,9 @@ own state — see **Deployment** below for the init order.
 
 GitHub Actions (`.github/workflows/terraform.yml`):
 
-- **`test`** (every push and PR): `terraform fmt -check`, the full Lambda
-  test suite, the full Glue/PySpark test suite. Deploys are blocked if this
-  fails.
-- **`plan`** (pull requests only): `terraform plan` across every module, for
-  review before merge.
+- **`test`** (every push and PR): installs the Python test dependencies,
+  runs the full Lambda + Glue/PySpark suite, and enforces **95% minimum
+  line coverage**. Deploys are blocked if this fails.
 - **`deploy`** (push to `main`, after `test` passes): applies every module in
   dependency order.
 
@@ -222,12 +220,17 @@ GitHub Actions (`.github/workflows/terraform.yml`):
 Business logic (growth rates, velocity, persistence, trend scoring, category
 momentum, channel ranking, cross-market analysis, data quality checks) is
 kept as pure functions, separated from AWS I/O, and covered by
-`tests/lambda/` and `tests/glue/`. Run locally:
+`tests/lambda/` and `tests/glue/`. The CI gate requires **at least 95% line
+coverage** across the Lambda and Glue transformation code.
+
+Run the full suite locally:
 
 ```bash
-make test         # Lambda unit tests
-make test-glue     # Glue/PySpark unit tests (requires Java + pyspark)
+make test
 ```
+
+Glue tests require Java and PySpark. The test suite mocks AWS I/O so it does
+not require an AWS account or real S3/Athena/SNS calls.
 
 ---
 
@@ -332,3 +335,8 @@ Quality Engineering · Explainable scoring/classification design
 ## License
 
 This project is licensed under the MIT License.
+
+
+## Testing and CI
+
+See [docs/testing.md](docs/testing.md) for the Python/PySpark coverage gate, Terraform validation, SQL contract tests, and CI/CD quality-gate order.

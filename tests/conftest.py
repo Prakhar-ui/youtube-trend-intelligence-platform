@@ -3,6 +3,18 @@ import pathlib
 
 import pytest
 
+# Unit tests mock AWS Wrangler I/O; keep collection lightweight when the
+# production-only dependency is not installed locally.
+try:
+    import awswrangler  # noqa: F401
+except ImportError:
+    import sys
+    import types
+    _wr = types.ModuleType("awswrangler")
+    _wr.s3 = types.SimpleNamespace(to_parquet=None)
+    _wr.athena = types.SimpleNamespace(read_sql_query=None)
+    sys.modules["awswrangler"] = _wr
+
 SCRIPTS_ROOT = pathlib.Path(__file__).parent.parent / "terraform" / "lambda" / "scripts"
 
 
