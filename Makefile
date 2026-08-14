@@ -62,7 +62,7 @@ test: ## Run Lambda unit tests
 	cd tests && pip install -q -r requirements-test.txt && pytest -v
 
 test-glue: ## Run Glue PySpark unit tests
-	cd tests && pip install -q pyspark pytest && pytest tests/glue/ -v
+	cd tests && pip install -q pyspark pytest && pytest glue/ -v
 
 install: ## Install development dependencies
 	pip install -q -r tests/requirements-test.txt
