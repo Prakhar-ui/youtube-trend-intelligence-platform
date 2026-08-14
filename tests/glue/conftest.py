@@ -45,3 +45,13 @@ def silver_to_gold_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def trend_intelligence_module():
+    """Loads the trend_intelligence module."""
+    path = SCRIPTS_ROOT / 'trend_intelligence.py'
+    spec = importlib.util.spec_from_file_location('trend_intelligence_module', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
