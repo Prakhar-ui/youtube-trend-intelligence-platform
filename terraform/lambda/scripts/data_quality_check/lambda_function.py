@@ -30,7 +30,60 @@ CRITICAL_COLUMNS = {
         "channel_title",
         "views",
         "region"
-    ]
+    ],
+    "video_trends": [
+        "video_id",
+        "region",
+        "snapshot_date",
+        "views",
+        "trend_stage",
+    ],
+    "category_analytics": [
+        "category_id",
+        "category_name",
+        "region",
+        "snapshot_date",
+    ],
+    "channel_analytics": [
+        "channel_id",
+        "channel_title",
+        "region",
+        "snapshot_date",
+    ],
+    "trend_opportunities": [
+        "snapshot_date",
+        "scope",
+        "entity_id",
+        "trend_score",
+    ],
+}
+
+# Grain (natural key) for each table -- used by check_uniqueness. A duplicate
+# key here means the same real-world observation/opportunity was written
+# twice, which would silently double-count in every downstream aggregate and
+# dashboard total.
+UNIQUE_KEYS = {
+    "clean_statistics": ["video_id", "region", "trending_date_parsed"],
+    "video_trends": ["video_id", "region", "snapshot_date"],
+    "category_analytics": ["category_id", "region", "snapshot_date"],
+    "channel_analytics": ["channel_id", "region", "snapshot_date"],
+    "trend_opportunities": ["scope", "region", "entity_id", "snapshot_date"],
+}
+
+# Expected value ranges for Gold-layer scored/normalized columns. Every score
+# in gold_trend_opportunities is documented (docs/trend_intelligence.md) as a
+# 0-100 percentile-based value -- if the computation has a bug, this is the
+# cheapest place to catch it, before it reaches a dashboard.
+METRIC_BOUNDS = {
+    "trend_opportunities": [
+        ("trend_score", 0, 100),
+        ("velocity_score", 0, 100),
+        ("engagement_score", 0, 100),
+        ("market_expansion_score", 0, 100),
+    ],
+    "video_trends": [
+        ("persistence_score", 0, 100),
+    ],
 }
 
 # ── Core Business Logic (Pure functions, no AWS dependencies) ────────────────
@@ -149,6 +202,65 @@ def check_freshness(df: pd.DataFrame, table_name: str, freshness_hours: int) -> 
         }
 
 
+def check_uniqueness(df: pd.DataFrame, table_name: str, key_columns: list = None) -> dict:
+    """Flags rows sharing a duplicate natural key -- e.g. the same video
+    observed twice for the same region+snapshot_date. A duplicate here means
+    every downstream aggregate/dashboard total for that row is double-counted.
+    """
+    key_columns = key_columns if key_columns is not None else UNIQUE_KEYS.get(table_name, [])
+
+    if not key_columns or not all(c in df.columns for c in key_columns):
+        return {
+            "check": "uniqueness",
+            "table": table_name,
+            "passed": True,
+            "message": "No key columns configured or present for this table -- skipping",
+        }
+
+    duplicate_count = int(df.duplicated(subset=key_columns, keep=False).sum())
+    passed = duplicate_count == 0
+    key_desc = "+".join(key_columns)
+    return {
+        "check": "uniqueness",
+        "table": table_name,
+        "key_columns": key_columns,
+        "duplicate_row_count": duplicate_count,
+        "passed": passed,
+        "message": (
+            f"{duplicate_count} row(s) share a duplicate {key_desc} key"
+            if duplicate_count else f"No duplicate {key_desc} keys"
+        ),
+    }
+
+
+def check_metric_sanity(df: pd.DataFrame, table_name: str, bounds: list = None) -> list:
+    """Checks that scored/normalized Gold columns (e.g. the 0-100
+    trend/velocity/engagement scores documented in
+    docs/trend_intelligence.md) actually stay within their documented range.
+    A value outside range means the scoring formula has a real bug -- this is
+    the cheapest place to catch it, before it reaches a dashboard."""
+    bounds = bounds if bounds is not None else METRIC_BOUNDS.get(table_name, [])
+    results = []
+
+    for column, lo, hi in bounds:
+        if column not in df.columns:
+            continue
+        series = df[column].dropna()
+        out_of_bounds = int(((series < lo) | (series > hi)).sum())
+        passed = out_of_bounds == 0
+        results.append({
+            "check": "metric_sanity",
+            "table": table_name,
+            "column": column,
+            "out_of_bounds_count": out_of_bounds,
+            "expected_range": [lo, hi],
+            "passed": passed,
+            "message": f"{column}: {out_of_bounds} value(s) outside [{lo}, {hi}]",
+        })
+
+    return results
+
+
 # ── AWS I/O Adapters (Easily mockable in tests) ──────────────────────────────
 
 def fetch_table_data(database: str, table_name: str, athena_output: str, workgroup: str) -> pd.DataFrame:
@@ -209,6 +321,8 @@ def lambda_handler(event, context):
         checks.append(check_schema(df, table_name))
         checks.extend(check_value_ranges(df, table_name, config["max_views"]))
         checks.append(check_freshness(df, table_name, config["freshness_hours"]))
+        checks.append(check_uniqueness(df, table_name))
+        checks.extend(check_metric_sanity(df, table_name))
 
         for check in checks:
             logger.info(f"  {check['check']}: {'PASS' if check['passed'] else 'FAIL'} — {check['message']}")
@@ -220,8 +334,10 @@ def lambda_handler(event, context):
     # Summary and Alerting
     passed_count = sum(1 for r in all_results if r["passed"])
     total_count = len(all_results)
-    
-    logger.info(f"DQ Summary: {passed_count}/{total_count} passed. Overall: {'PASS' if overall_passed else 'FAIL'}")
+    failed_count = total_count - passed_count
+    quality_score = round((passed_count / total_count) * 100, 2) if total_count else 100.0
+
+    logger.info(f"DQ Summary: {passed_count}/{total_count} passed ({quality_score}%). Overall: {'PASS' if overall_passed else 'FAIL'}")
 
     if not overall_passed and config["sns_topic"]:
         failed = [r for r in all_results if not r["passed"]]
@@ -232,7 +348,9 @@ def lambda_handler(event, context):
 
     return {
         "quality_passed": bool(overall_passed),
+        "quality_score": quality_score,
         "checks_passed": int(passed_count),
+        "checks_failed": int(failed_count),
         "checks_total": int(total_count),
         "details": json.loads(json.dumps(all_results, default=str)),
     }

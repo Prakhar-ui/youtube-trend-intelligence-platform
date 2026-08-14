@@ -103,3 +103,73 @@ def test_check_value_ranges_result_is_json_safe(data_quality_check_module, clean
 def test_check_value_ranges_skips_non_statistics_tables(data_quality_check_module, clean_df):
     results = data_quality_check_module.check_value_ranges(clean_df, "clean_reference_data", max_views=1000)
     assert results == []
+
+
+def test_check_uniqueness_passes_with_no_duplicates(data_quality_check_module):
+    df = pd.DataFrame({
+        "video_id": ["a", "b", "c"],
+        "region": ["us", "us", "us"],
+        "trending_date_parsed": ["2024-07-17"] * 3,
+    })
+    result = data_quality_check_module.check_uniqueness(df, "clean_statistics")
+    assert result["passed"] is True
+    assert result["duplicate_row_count"] == 0
+
+
+def test_check_uniqueness_flags_duplicate_keys(data_quality_check_module):
+    df = pd.DataFrame({
+        "video_id": ["a", "a", "b"],
+        "region": ["us", "us", "us"],
+        "trending_date_parsed": ["2024-07-17", "2024-07-17", "2024-07-17"],
+    })
+    result = data_quality_check_module.check_uniqueness(df, "clean_statistics")
+    assert result["passed"] is False
+    assert result["duplicate_row_count"] == 2  # both copies of the 'a' row are flagged
+
+
+def test_check_uniqueness_skips_when_key_columns_missing(data_quality_check_module):
+    df = pd.DataFrame({"video_id": ["a", "a"]})  # missing region/trending_date_parsed
+    result = data_quality_check_module.check_uniqueness(df, "clean_statistics")
+    assert result["passed"] is True
+    assert "skipping" in result["message"]
+
+
+def test_check_uniqueness_result_is_json_safe(data_quality_check_module):
+    df = pd.DataFrame({
+        "video_id": ["a", "a"],
+        "region": ["us", "us"],
+        "trending_date_parsed": ["2024-07-17", "2024-07-17"],
+    })
+    result = data_quality_check_module.check_uniqueness(df, "clean_statistics")
+    round_tripped = json.loads(json.dumps(result))
+    assert round_tripped["passed"] is False
+    assert isinstance(round_tripped["duplicate_row_count"], int)
+
+
+def test_check_metric_sanity_passes_within_bounds(data_quality_check_module):
+    df = pd.DataFrame({"trend_score": [10.0, 50.0, 99.5]})
+    results = data_quality_check_module.check_metric_sanity(df, "trend_opportunities")
+    trend_score_check = next(r for r in results if r["column"] == "trend_score")
+    assert trend_score_check["passed"] is True
+
+
+def test_check_metric_sanity_fails_out_of_bounds(data_quality_check_module):
+    df = pd.DataFrame({"trend_score": [10.0, 150.0, -5.0]})  # 150 and -5 are both invalid for a 0-100 score
+    results = data_quality_check_module.check_metric_sanity(df, "trend_opportunities")
+    trend_score_check = next(r for r in results if r["column"] == "trend_score")
+    assert trend_score_check["passed"] is False
+    assert trend_score_check["out_of_bounds_count"] == 2
+
+
+def test_check_metric_sanity_ignores_nulls(data_quality_check_module):
+    """A null score (e.g. a new entrant with no velocity yet) is not an
+    out-of-bounds value -- it's legitimately unknown, checked elsewhere."""
+    df = pd.DataFrame({"trend_score": [10.0, None, 50.0]})
+    results = data_quality_check_module.check_metric_sanity(df, "trend_opportunities")
+    trend_score_check = next(r for r in results if r["column"] == "trend_score")
+    assert trend_score_check["passed"] is True
+
+
+def test_check_metric_sanity_skips_unconfigured_table(data_quality_check_module, clean_df):
+    results = data_quality_check_module.check_metric_sanity(clean_df, "clean_statistics")
+    assert results == []
