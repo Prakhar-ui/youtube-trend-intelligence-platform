@@ -4,16 +4,55 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 env:
+  AWS_REGION: ap-south-1
   TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
 
 jobs:
-  deploy:
+
+  # ============================================================
+  # CI
+  # ============================================================
+  test:
+    name: CI - Test & Validate
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests
+        run: |
+          pytest \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=95
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      # --------------------------------------------------------
+      # Terraform validation
+      # --------------------------------------------------------
 
       - name: Cache Terraform Plugins
         uses: actions/cache@v4
@@ -26,71 +65,141 @@ jobs:
       - name: Create Plugin Cache Directory
         run: mkdir -p ~/.terraform.d/plugin-cache
 
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Validate Terraform
+        run: |
+          for dir in terraform/*; do
+            if [ -d "$dir" ]; then
+              echo "Validating $dir"
+              cd "$dir"
+              terraform init -backend=false
+              terraform validate
+              cd ../..
+            fi
+          done
+
+  # ============================================================
+  # CD
+  # ============================================================
+  deploy:
+    name: CD - Deploy to AWS
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy s3
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Create Plugin Cache Directory
+        run: mkdir -p ~/.terraform.d/plugin-cache
+
+      # --------------------------------------------------------
+      # S3
+      # --------------------------------------------------------
+
+      - name: Deploy S3
         working-directory: ./terraform/s3
         run: |
           terraform init
           terraform validate
           terraform apply -auto-approve
 
-      - name: Deploy iam
+      # --------------------------------------------------------
+      # IAM
+      # --------------------------------------------------------
+
+      - name: Deploy IAM
         working-directory: ./terraform/iam
         run: |
           terraform init
           terraform validate
           terraform apply -auto-approve
 
-      - name: Deploy sns
+      # --------------------------------------------------------
+      # SNS
+      # --------------------------------------------------------
+
+      - name: Deploy SNS
         working-directory: ./terraform/sns
         run: |
           terraform init
           terraform validate
           terraform apply -auto-approve
 
-      - name: Deploy glue
+      # --------------------------------------------------------
+      # Glue
+      # --------------------------------------------------------
+
+      - name: Deploy Glue
         working-directory: ./terraform/glue
         run: |
           terraform init
           terraform validate
           terraform apply -auto-approve
 
-      - name: Deploy lambda
+      # --------------------------------------------------------
+      # Lambda
+      # --------------------------------------------------------
+
+      - name: Deploy Lambda
         working-directory: ./terraform/lambda
         run: |
           terraform init
           terraform validate
-          terraform apply -auto-approve -var="youtube_api_key=${{ secrets.YOUTUBE_API_KEY }}"
+          terraform apply \
+            -auto-approve \
+            -var="youtube_api_key=${{ secrets.YOUTUBE_API_KEY }}"
 
-      - name: Deploy step_functions
+      # --------------------------------------------------------
+      # Step Functions
+      # --------------------------------------------------------
+
+      - name: Deploy Step Functions
         working-directory: ./terraform/step_functions
         run: |
           terraform init
           terraform validate
-          terraform import aws_sfn_state_machine.yt_pipeline_state_machine arn:aws:states:ap-south-1:585008079281:stateMachine:yt-data-pipeline-orchestration-dev || true
           terraform apply -auto-approve
 
-      - name: Deploy eventbridge
+      # --------------------------------------------------------
+      # EventBridge
+      # --------------------------------------------------------
+
+      - name: Deploy EventBridge
         working-directory: ./terraform/eventbridge
         run: |
           terraform init
           terraform validate
           terraform apply -auto-approve
 
-      - name: Deploy monitoring
+      # --------------------------------------------------------
+      # Monitoring
+      # --------------------------------------------------------
+
+      - name: Deploy Monitoring
         working-directory: ./terraform/monitoring
         run: |
           terraform init
           terraform validate
           terraform apply -auto-approve
 
-      - name: Deploy budget
+      # --------------------------------------------------------
+      # Budget
+      # --------------------------------------------------------
+
+      - name: Deploy Budget
         working-directory: ./terraform/budget
         run: |
           terraform init
