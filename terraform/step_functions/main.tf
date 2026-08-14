@@ -447,7 +447,124 @@ resource "aws_sfn_state_machine" "yt_pipeline_state_machine" {
           }
         ]
 
-        Next = "NotifySuccess"
+        Next = "RunTrendIntelligenceGlueJob"
+      }
+
+      #################################################
+      # Trend Intelligence Glue Job
+      #
+      # Runs after silver_to_gold_analytics and reads its
+      # category_analytics/channel_analytics outputs from the
+      # Glue Catalog to build gold_video_trends and
+      # gold_trend_opportunities (velocity, persistence, trend
+      # scoring, cross-market expansion — see
+      # docs/trend_intelligence.md).
+      #################################################
+
+      RunTrendIntelligenceGlueJob = {
+
+        Type = "Task"
+
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+
+        Parameters = {
+
+          JobName = "trend_intelligence"
+
+          Arguments = {
+
+            "--silver_database" = "yt_pipeline_silver_dev"
+
+            "--gold_bucket" = format("%s-gold-%s", local.name_prefix, local.account_id)
+
+            "--gold_database" = "yt_pipeline_gold_dev"
+          }
+        }
+
+        ResultPath = "$.glue_trend_intelligence_result"
+
+        Catch = [
+          {
+            ErrorEquals = [
+              "States.ALL"
+            ]
+
+            Next = "NotifyTransformFailure"
+
+            ResultPath = "$.error"
+          }
+        ]
+
+        Next = "RunGoldDataQualityChecks"
+      }
+
+      #################################################
+      # Gold Layer Quality Gate
+      #
+      # Mirrors the Silver-layer RunDataQualityChecks /
+      # EvaluateDataQuality pattern above, but checks the
+      # scored/derived Gold tables (uniqueness of the
+      # video/opportunity grain, and that every 0-100 score
+      # in gold_trend_opportunities actually stayed in
+      # range — see check_uniqueness / check_metric_sanity
+      # in data_quality_check/lambda_function.py). A bad
+      # trend-scoring bug is caught here instead of reaching
+      # a dashboard.
+      #################################################
+
+      RunGoldDataQualityChecks = {
+
+        Type = "Task"
+
+        Resource = "arn:aws:states:::lambda:invoke"
+
+        Parameters = {
+          FunctionName = format("arn:aws:lambda:%s:%s:function:%s-data-quality-check", local.region, local.account_id, local.name_prefix)
+
+          Payload = {
+            layer = "gold"
+
+            database = "yt_pipeline_gold_dev"
+
+            tables = [
+              "video_trends",
+              "trend_opportunities"
+            ]
+          }
+        }
+
+        ResultPath = "$.gold_dq_result"
+
+        Catch = [
+          {
+            ErrorEquals = [
+              "States.ALL"
+            ]
+
+            Next = "NotifyDQFailure"
+
+            ResultPath = "$.error"
+          }
+        ]
+
+        Next = "EvaluateGoldDataQuality"
+      }
+
+      EvaluateGoldDataQuality = {
+
+        Type = "Choice"
+
+        Choices = [
+          {
+            Variable = "$.gold_dq_result.Payload.quality_passed"
+
+            BooleanEquals = true
+
+            Next = "NotifySuccess"
+          }
+        ]
+
+        Default = "NotifyDQFailure"
       }
 
       #################################################
