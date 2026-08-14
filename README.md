@@ -205,7 +205,7 @@ own state — see **Deployment** below for the init order.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/terraform.yml`):
+GitHub Actions (`.github/workflows/terraform-deploy.yml`):
 
 - **`test`** (every push and PR): installs the Python test dependencies,
   runs the full Lambda + Glue/PySpark suite, and enforces **95% minimum

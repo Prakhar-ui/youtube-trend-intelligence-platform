@@ -8,7 +8,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 TERRAFORM_ROOT = ROOT / "terraform"
-WORKFLOW = ROOT / ".github" / "workflows" / "terraform.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "terraform-deploy.yml"
 MAKEFILE = ROOT / "Makefile"
 
 EXPECTED_MODULES = {
