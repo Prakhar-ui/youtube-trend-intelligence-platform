@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -66,7 +67,7 @@ jobs:
         with:
           name: pytest-coverage
           path: coverage.xml
-          if-no-files-found: error
+          if-no-files-found: warn
 
       # ----------------------------------------------------------
       # Terraform
@@ -86,16 +87,13 @@ jobs:
             terraform-${{ runner.os }}-
 
       - name: Create Terraform plugin cache
-        run: |
-          mkdir -p ~/.terraform.d/plugin-cache
+        run: mkdir -p ~/.terraform.d/plugin-cache
 
       - name: Terraform format check
-        run: |
-          terraform fmt -check -recursive
+        run: terraform fmt -check -recursive
 
       - name: Validate every Terraform module
-        run: |
-          ./scripts/validate_terraform.sh
+        run: ./scripts/validate_terraform.sh
 
       # ----------------------------------------------------------
       # Repository contract tests
@@ -113,14 +111,17 @@ jobs:
   deploy:
     name: CD - Terraform Deploy
 
-    # Deployment is blocked unless CI passes.
+    # Never deploy unless all quality checks pass.
     needs: quality
 
-    # Deploy only from a push to main.
+    # Deploy on pushes to main or manual runs targeting main.
     # Pull requests execute CI only.
     if: >
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch'
+      )
 
     runs-on: ubuntu-latest
 
@@ -147,8 +148,7 @@ jobs:
             terraform-${{ runner.os }}-
 
       - name: Create Terraform plugin cache
-        run: |
-          mkdir -p ~/.terraform.d/plugin-cache
+        run: mkdir -p ~/.terraform.d/plugin-cache
 
       # ----------------------------------------------------------
       # AWS
@@ -161,6 +161,33 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ----------------------------------------------------------
+      # Verify the target AWS account
+      # ----------------------------------------------------------
+
+      - name: Verify AWS Account
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${EXPECTED_ACCOUNT_ID:-}" ]; then
+            echo "ERROR: AWS_ACCOUNT_ID secret is missing."
+            exit 1
+          fi
+
+          ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          if [ "$ACTUAL_ACCOUNT_ID" != "$EXPECTED_ACCOUNT_ID" ]; then
+            echo "ERROR: AWS account mismatch."
+            echo "Expected account does not match authenticated account."
+            exit 1
+          fi
+
+          echo "AWS account verification successful."
+
       # ==========================================================
       # S3
       # ==========================================================
@@ -170,7 +197,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # IAM
@@ -181,7 +209,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # SNS
@@ -192,7 +221,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # GLUE
@@ -203,7 +233,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # LAMBDA
@@ -211,13 +242,16 @@ jobs:
 
       - name: Deploy Lambda
         working-directory: ./terraform/lambda
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply \
-            -auto-approve \
+          terraform plan \
             -input=false \
-            -var="youtube_api_key=${{ secrets.YOUTUBE_API_KEY }}"
+            -out=tfplan \
+            -var="youtube_api_key=${YOUTUBE_API_KEY}"
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # STEP FUNCTIONS
@@ -228,7 +262,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # EVENTBRIDGE
@@ -239,7 +274,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # MONITORING
@@ -250,7 +286,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # BUDGET
@@ -261,7 +298,8 @@ jobs:
         run: |
           terraform init -input=false
           terraform validate
-          terraform apply -auto-approve -input=false
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
 
       # ==========================================================
       # SUMMARY
